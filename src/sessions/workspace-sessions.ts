@@ -6,10 +6,16 @@
 //   1. sessionPersistence service (preferred): headers carry createdAt, cwd,
 //      agentPreset and origin — exact cwd equality, subagent children excluded.
 //   2. filesystem scan (fallback): <DSH_HOME>/sessions/<projectKey(cwd)>/<encoded-id>/
-//      session.jsonl.zstd, decoded + mtime-sorted. The projectKey encoding is
+//      <generation log>, decoded + mtime-sorted. The projectKey encoding is
 //      ported VERBATIM from dsh-session-persistence-jsonl (lossy by design —
 //      separators collapse, unsafe code units escape as ~XXXX) so the scan
 //      lands in exactly the directory DSH writes.
+//
+// Generation log filename: dsh 0.1.x wrote a fixed `session.jsonl.zstd`
+// (format v0 "suffix-only" name); dsh 0.2.x writes generation-versioned
+// `session.v<N>.jsonl.zstd` (e.g. v4 on 0.2.1-rc.x). The scan accepts both
+// and picks the highest generation present, so /resume keeps working across
+// harness generations instead of silently listing nothing.
 //
 // Harness-agnostic: the service is injected as a narrow structural interface.
 
@@ -134,6 +140,33 @@ export function decodeSessionDirName(name: string): string {
 	);
 }
 
+/**
+ * Canonical session log filename across harness generations: bare
+ * `session.jsonl.zstd` (v0, dsh 0.1.x) or `session.v<N>.jsonl.zstd`
+ * (generation N, dsh 0.2.x).
+ */
+export const SESSION_LOG_RE = /^session(?:\.v(\d+))?\.jsonl\.zstd$/;
+
+/**
+ * Pick the highest-generation session log inside one session directory.
+ * Returns the file name (not a path), or undefined when the session has no
+ * materialized log (never written / mid-migration) and is not resumable.
+ */
+export function sessionLogFileName(sessionDir: string): string | undefined {
+	let best: string | undefined;
+	let bestGen = -1;
+	for (const entry of readdirSync(sessionDir)) {
+		const m = SESSION_LOG_RE.exec(entry);
+		if (!m) continue;
+		const gen = m[1] === undefined ? 0 : Number(m[1]);
+		if (gen > bestGen) {
+			bestGen = gen;
+			best = entry;
+		}
+	}
+	return best;
+}
+
 /** List historical sessions of one workspace, newest first, capped. */
 export async function listWorkspaceSessions(
 	deps: ListWorkspaceSessionsDeps,
@@ -175,12 +208,13 @@ export async function listWorkspaceSessions(
 		const dir = join(deps.sessionsRoot, projectKeyOf(deps.cwd));
 		if (existsSync(dir)) {
 			for (const name of readdirSync(dir)) {
-				const log = join(dir, name, "session.jsonl.zstd");
 				let mtime: number;
 				try {
-					mtime = statSync(log).mtimeMs;
+					const file = sessionLogFileName(join(dir, name));
+					if (!file) continue; // no materialized log — not resumable
+					mtime = statSync(join(dir, name, file)).mtimeMs;
 				} catch {
-					continue; // no materialized log — not resumable
+					continue;
 				}
 				const id = decodeSessionDirName(name);
 				if (exclude.has(id)) continue;

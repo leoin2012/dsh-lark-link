@@ -8,6 +8,7 @@ import {
 	decodeSessionDirName,
 	listWorkspaceSessions,
 	extractTitleFromEvents,
+	sessionLogFileName,
 } from "../../../src/sessions/workspace-sessions.ts";
 
 
@@ -150,6 +151,59 @@ test("list: scan fallback reads the workspace project dir, decodes ids, sorts by
 	);
 	assert.equal(rows[0]!.source, "scan");
 	assert.ok(rows[0]!.createdAt >= rows[1]!.createdAt);
+	rmSync(root, { recursive: true, force: true });
+});
+
+test("sessionLogFileName: bare v0 name and versioned generations both match", () => {
+	const root = mkdtempSync(join(tmpdir(), "dsh-ws-gen-"));
+	mkdirSync(join(root, "v0"));
+	writeFileSync(join(root, "v0", "session.jsonl.zstd"), "x");
+	assert.equal(sessionLogFileName(join(root, "v0")), "session.jsonl.zstd");
+	mkdirSync(join(root, "v4"));
+	writeFileSync(join(root, "v4", "session.v4.jsonl.zstd"), "x");
+	assert.equal(sessionLogFileName(join(root, "v4")), "session.v4.jsonl.zstd");
+	rmSync(root, { recursive: true, force: true });
+});
+
+test("sessionLogFileName: highest generation wins; unrelated files ignored", () => {
+	const root = mkdtempSync(join(tmpdir(), "dsh-ws-gen2-"));
+	writeFileSync(join(root, "session.jsonl.zstd"), "x");
+	writeFileSync(join(root, "session.v1.jsonl.zstd"), "x");
+	writeFileSync(join(root, "session.v4.jsonl.zstd"), "x");
+	writeFileSync(join(root, "session.lock"), "x");
+	writeFileSync(join(root, "session.v4.jsonl"), "x"); // 未压缩 → 不算
+	writeFileSync(join(root, "session.vx.jsonl.zstd"), "x"); // 非法代际 → 不算
+	assert.equal(sessionLogFileName(root), "session.v4.jsonl.zstd");
+	rmSync(root, { recursive: true, force: true });
+});
+
+test("sessionLogFileName: empty dir returns undefined", () => {
+	const root = mkdtempSync(join(tmpdir(), "dsh-ws-gen3-"));
+	assert.equal(sessionLogFileName(root), undefined);
+	rmSync(root, { recursive: true, force: true });
+});
+
+test("list: scan fallback finds dsh 0.2.x generation-versioned logs (GH regression)", async () => {
+	// 真实场景回归：dsh 0.2.1-rc.x 只写 session.v4.jsonl.zstd，旧扫描器写死
+	// session.jsonl.zstd 导致 /resume 永远显示「该工作区暂无历史会话日志」。
+	const root = mkdtempSync(join(tmpdir(), "dsh-ws-list-v4-"));
+	const dir = join(root, projectKeyOf("/ws/proj"));
+	mkdirSync(join(dir, "lark-link~003Adm~003Aoc_x~003An1~003A0"), {
+		recursive: true,
+	});
+	writeFileSync(
+		join(dir, "lark-link~003Adm~003Aoc_x~003An1~003A0", "session.v4.jsonl.zstd"),
+		"x",
+	);
+	const rows = await listWorkspaceSessions({
+		sessionsRoot: root,
+		cwd: "/ws/proj",
+	});
+	assert.deepEqual(
+		rows.map((r) => r.id),
+		["lark-link:dm:oc_x:n1:0"],
+	);
+	assert.equal(rows[0]!.source, "scan");
 	rmSync(root, { recursive: true, force: true });
 });
 
