@@ -32,6 +32,31 @@ export interface SessionHeaderLike {
 	title?: string;
 }
 
+/**
+ * dsh 0.2.x `sessionPersistence.list()` returns snapshot rows wrapping the
+ * header (`{ header, revision, sizeBytes?, ... }`, including not-yet-materialized
+ * pending entries), while the original contract here expected bare headers.
+ * Accept both shapes so the service source works across harness generations —
+ * with snapshots unwrapped, fresh sessions become listable the moment they are
+ * created (in-process visibility), before their log file hits disk.
+ */
+export function unwrapSessionHeader(row: unknown): SessionHeaderLike | undefined {
+	if (!row || typeof row !== "object") return undefined;
+	const rec = row as Record<string, unknown>;
+	const candidate = "header" in rec && rec.header && typeof rec.header === "object"
+		? (rec.header as Record<string, unknown>)
+		: rec;
+	if (typeof candidate.id !== "string" || typeof candidate.createdAt !== "number") {
+		return undefined;
+	}
+	const header: SessionHeaderLike = { id: candidate.id, createdAt: candidate.createdAt };
+	if (typeof candidate.cwd === "string") header.cwd = candidate.cwd;
+	if (typeof candidate.agentPreset === "string") header.agentPreset = candidate.agentPreset;
+	if (typeof candidate.origin === "string") header.origin = candidate.origin;
+	if (typeof candidate.title === "string") header.title = candidate.title;
+	return header;
+}
+
 export interface WorkspaceSessionInfo {
 	id: string;
 	/** epoch ms — header createdAt (service) or log mtime (scan). */
@@ -44,7 +69,7 @@ export interface WorkspaceSessionInfo {
 }
 
 export interface PersistenceListSource {
-	list(signal?: AbortSignal): Promise<SessionHeaderLike[]>;
+	list(signal?: AbortSignal): Promise<unknown[]>;
 	inspect?(id: string, signal?: AbortSignal): Promise<{ meta?: unknown; events?: readonly unknown[] } | undefined>;
 	load?(id: string): Promise<{ header?: unknown; events?: readonly unknown[] } | undefined>;
 	readFrom?(id: string, fromSeq: number): Promise<{ meta?: unknown; events?: readonly unknown[] } | undefined>;
@@ -178,7 +203,9 @@ export async function listWorkspaceSessions(
 	// Source 1: the persistence service — headers give exact cwd + origin.
 	if (deps.persistence?.list) {
 		try {
-			const headers = await deps.persistence.list();
+			const headers = (await deps.persistence.list())
+				.map(unwrapSessionHeader)
+				.filter((h): h is SessionHeaderLike => h !== undefined);
 			rows = headers
 				.filter(
 					(h) =>

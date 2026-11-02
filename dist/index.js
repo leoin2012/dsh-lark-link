@@ -1219,6 +1219,29 @@ function createConversationConfigStore(file) {
 //#endregion
 //#region src/sessions/workspace-sessions.ts
 /**
+* dsh 0.2.x `sessionPersistence.list()` returns snapshot rows wrapping the
+* header (`{ header, revision, sizeBytes?, ... }`, including not-yet-materialized
+* pending entries), while the original contract here expected bare headers.
+* Accept both shapes so the service source works across harness generations —
+* with snapshots unwrapped, fresh sessions become listable the moment they are
+* created (in-process visibility), before their log file hits disk.
+*/
+function unwrapSessionHeader(row) {
+	if (!row || typeof row !== "object") return void 0;
+	const rec = row;
+	const candidate = "header" in rec && rec.header && typeof rec.header === "object" ? rec.header : rec;
+	if (typeof candidate.id !== "string" || typeof candidate.createdAt !== "number") return;
+	const header = {
+		id: candidate.id,
+		createdAt: candidate.createdAt
+	};
+	if (typeof candidate.cwd === "string") header.cwd = candidate.cwd;
+	if (typeof candidate.agentPreset === "string") header.agentPreset = candidate.agentPreset;
+	if (typeof candidate.origin === "string") header.origin = candidate.origin;
+	if (typeof candidate.title === "string") header.title = candidate.title;
+	return header;
+}
+/**
 * Extract a human-readable title from a session's events:
 * 1. session/title event (highest precedence)
 * 2. first user message text (deterministic fallback)
@@ -1303,7 +1326,7 @@ async function listWorkspaceSessions(deps) {
 	const exclude = new Set(deps.exclude ?? []);
 	let rows = [];
 	if (deps.persistence?.list) try {
-		rows = (await deps.persistence.list()).filter((h) => h.cwd === deps.cwd && h.origin !== "subagent" && !exclude.has(h.id)).sort((a, b) => b.createdAt - a.createdAt).slice(0, limit).map((h) => {
+		rows = (await deps.persistence.list()).map(unwrapSessionHeader).filter((h) => h !== void 0).filter((h) => h.cwd === deps.cwd && h.origin !== "subagent" && !exclude.has(h.id)).sort((a, b) => b.createdAt - a.createdAt).slice(0, limit).map((h) => {
 			const title = deps.titleFor?.(h.id) ?? h.title;
 			return {
 				id: h.id,

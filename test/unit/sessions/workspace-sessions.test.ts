@@ -9,6 +9,7 @@ import {
 	listWorkspaceSessions,
 	extractTitleFromEvents,
 	sessionLogFileName,
+	unwrapSessionHeader,
 } from "../../../src/sessions/workspace-sessions.ts";
 
 
@@ -94,6 +95,45 @@ test("list: service source filters by cwd, excludes subagents, sorts desc", asyn
 	);
 	assert.equal(rows[0]!.preset, "ptc");
 	assert.equal(rows[0]!.source, "service");
+});
+
+test("unwrapSessionHeader: bare headers pass through, snapshots unwrap, junk drops", () => {
+	const bare = { id: "a", createdAt: 1, cwd: "/ws" };
+	assert.deepEqual(unwrapSessionHeader(bare), bare);
+	assert.deepEqual(
+		unwrapSessionHeader({ header: { id: "b", createdAt: 2, cwd: "/ws" }, revision: "1:2" }),
+		{ id: "b", createdAt: 2, cwd: "/ws" },
+	);
+	assert.equal(unwrapSessionHeader({ revision: "1:2" }), undefined);
+	assert.equal(unwrapSessionHeader(null), undefined);
+	assert.equal(unwrapSessionHeader("x"), undefined);
+});
+
+test("list: service source accepts dsh 0.2.x snapshot rows (GH regression)", async () => {
+	// 真实场景回归：dsh 0.2.1-rc.x 的 sessionPersistence.list() 返回
+	// { header, revision, sizeBytes } 快照行（含未落盘的 pending 新会话），
+	// 旧代码按裸 header 过滤导致全灭、静默回退到只能看到已落盘会话的扫描。
+	const persistence = {
+		async list() {
+			return [
+				{ header: { id: "fresh-pending", createdAt: 3000, cwd: "/ws/proj", agentPreset: "ptc" }, revision: "0:0" },
+				{ header: { id: "materialized", createdAt: 1000, cwd: "/ws/proj" }, revision: "10:1", sizeBytes: 42 },
+				{ header: { id: "other-ws", createdAt: 5000, cwd: "/elsewhere" }, revision: "9:1" },
+				{ header: { id: "sub", createdAt: 4000, cwd: "/ws/proj", origin: "subagent" }, revision: "8:1" },
+			];
+		},
+	};
+	const rows = await listWorkspaceSessions({
+		sessionsRoot: "/nonexistent",
+		cwd: "/ws/proj",
+		persistence,
+	});
+	assert.deepEqual(
+		rows.map((r) => r.id),
+		["fresh-pending", "materialized"],
+	);
+	assert.equal(rows[0]!.source, "service");
+	assert.equal(rows[0]!.preset, "ptc");
 });
 
 test("list: service source caps to limit", async () => {
