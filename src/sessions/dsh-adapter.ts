@@ -16,6 +16,11 @@ import { installModelSelection } from "@deepseek-ai/dsh-agent";
 import type { Agent } from "@deepseek-ai/dsh-agent";
 import type { SessionEvent } from "@deepseek-ai/dsh-session";
 import { createUserMessage } from "@deepseek-ai/dsh-llm";
+import {
+	shouldSynthesizeChunks,
+	synthesizeAssistantChunks,
+} from "./llm-chunk-synthesis.ts";
+import type { StreamChunk } from "@deepseek-ai/dsh-llm";
 import { defineTool } from "@deepseek-ai/dsh-tools";
 import type {
 	SessionEventOut,
@@ -290,6 +295,10 @@ export function createDshAdapter(deps: DshAdapterDeps): DshSessionBackend {
 	const keyBySession = new Map<string, string>();
 	const listeners = new Map<string, Set<(e: SessionEventOut) => void>>();
 	const disposers = new Map<string, () => void>();
+	// Sessions whose runtime natively emits assistant/chunk via session/event
+	// (dsh ≤0.1.x, or a future dsh that restores the event). There we must NOT
+	// also synthesize chunks from llm/stream — the card text would double.
+	const nativeChunkSessions = new Set<string>();
 	// GH #9: last assistant text of the CURRENT turn per conversation key.
 	// turn/start clears it, assistant/message refreshes it, turn/end carries
 	// it — the outbound forwarder uses it to rescue a delivery whose
@@ -1092,6 +1101,9 @@ export function createDshAdapter(deps: DshAdapterDeps): DshSessionBackend {
 				}
 				const out = toSessionEventOut(ev);
 				if (!out) return;
+				// Native chunk events take precedence: disable our llm/stream
+				// synthesis for this session to avoid double-feeding the card.
+				if (out.type === "assistant/chunk") nativeChunkSessions.add(sessionId);
 				// GH #9 rescue bookkeeping: track the current turn's final
 				// assistant text so turn/end can carry it downstream even if
 				// the assistant/message event itself was lost between here and
@@ -1109,6 +1121,37 @@ export function createDshAdapter(deps: DshAdapterDeps): DshSessionBackend {
 				if (set) for (const fn of set) fn(out);
 			},
 		) ?? (() => {});
+		// dsh 0.2.x never emits assistant/chunk through session/event (the
+		// literal only survives in legacy format converters), which leaves the
+		// CardKit streaming path permanently dark. The llm/stream waterfall
+		// hook DOES exist (dsh-llm wraps every model call with it), so tap the
+		// chunk stream here and synthesize the exact same events the native
+		// path would have produced — downstream (forwarder/supervisor) cannot
+		// tell the difference. Restricted to this agent's main agent-loop
+		// requests: title generation and other auxiliary calls also stream
+		// through the same hook and must not leak into the reply card.
+		// The cordis `on` union (plugin ctx | agent ctx) types per-event listener
+		// overloads that do not cover the llm/stream waterfall signature, so
+		// pin the call-site shape explicitly (runtime contract verified against
+		// dsh-llm: ctx.waterfall(this, "llm/stream", options, next)).
+		const onLlmStream = onFn as unknown as (
+			event: string,
+			listener: (
+				options: unknown,
+				next: () => AsyncIterable<StreamChunk>,
+			) => AsyncIterable<StreamChunk>,
+		) => (() => void) | undefined;
+		const llmStreamDisp =
+			onLlmStream("llm/stream", (options, next) => {
+				if (!shouldSynthesizeChunks(options, sessionId, nativeChunkSessions)) {
+					return next();
+				}
+				return synthesizeAssistantChunks(next(), (text) => {
+					const out: SessionEventOut = { type: "assistant/chunk", text };
+					const set = listeners.get(key);
+					if (set) for (const fn of set) fn(out);
+				});
+			}) ?? (() => {});
 		// GH #15: do NOT `disposers.set(key, disp)` here — the agent/error
 		// disposer below would OVERWRITE it in the plain Map, so handle
 		// dispose / rotate / releaseLiveSession / disposeIdle only ever
@@ -1180,11 +1223,14 @@ export function createDshAdapter(deps: DshAdapterDeps): DshSessionBackend {
 				}
 			},
 		);
-		// GH #15: compose BOTH subscription disposers into a single entry —
-		// never overwrite one with the other.
+		// GH #15: compose ALL subscription disposers into a single entry —
+		// never overwrite one with another.
 		disposers.set(key, () => {
 			try {
 				disp();
+			} catch {}
+			try {
+				llmStreamDisp();
 			} catch {}
 			try {
 				errDisp();

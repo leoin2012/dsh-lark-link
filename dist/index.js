@@ -1,13 +1,35 @@
 import { defineTool } from "@deepseek-ai/dsh-tools";
 import { basename, dirname, isAbsolute, join, relative, resolve, win32 } from "node:path";
 import { installModelSelection } from "@deepseek-ai/dsh-agent";
-import { createUserMessage } from "@deepseek-ai/dsh-llm";
+import { createUserMessage, isAgentLoopRequest } from "@deepseek-ai/dsh-llm";
 import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 import { homedir, tmpdir } from "node:os";
 import { gzipSync, zstdDecompressSync } from "node:zlib";
 import * as qrcode from "qrcode-terminal";
 import QRCode from "qrcode";
+//#region src/sessions/llm-chunk-synthesis.ts
+/**
+* Whether this llm/stream call should feed chunk synthesis for one bridge
+* session: same session, no native chunk events observed (those win), and a
+* main agent-loop request (title generation and other auxiliary LLM calls
+* also stream through the hook and must not leak into the reply card).
+*/
+function shouldSynthesizeChunks(options, sessionId, nativeChunkSessions) {
+	return options.sessionId === sessionId && !nativeChunkSessions.has(sessionId) && isAgentLoopRequest(options);
+}
+/**
+* Pass one LLM chunk stream through unchanged while emitting every visible
+* text delta. Reasoning deltas, tool-call deltas, empty texts and lifecycle
+* chunks flow through untouched and unannounced.
+*/
+async function* synthesizeAssistantChunks(stream, emit) {
+	for await (const chunk of stream) {
+		if (chunk?.type === "text-delta" && typeof chunk.text === "string" && chunk.text !== "") emit(chunk.text);
+		yield chunk;
+	}
+}
+//#endregion
 //#region src/common/config.ts
 const DEFAULT_CONFIG = {
 	credentialRef: "LARK_LINK_APP",
@@ -269,6 +291,7 @@ function createDshAdapter(deps) {
 	const keyBySession = /* @__PURE__ */ new Map();
 	const listeners = /* @__PURE__ */ new Map();
 	const disposers = /* @__PURE__ */ new Map();
+	const nativeChunkSessions = /* @__PURE__ */ new Set();
 	const lastAssistantText = /* @__PURE__ */ new Map();
 	const ensureInFlight = /* @__PURE__ */ new Map();
 	let runNonce = deps.runNonce ?? `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
@@ -723,10 +746,12 @@ function createDshAdapter(deps) {
 				lastUsedAt: Date.now()
 			});
 			keyBySession.set(sessionId, key);
-			const disp = (c.on ?? agent.ctx.on?.bind(agent.ctx))?.("session/event", (sess, ev) => {
+			const onFn = c.on ?? agent.ctx.on?.bind(agent.ctx);
+			const disp = onFn?.("session/event", (sess, ev) => {
 				if (sess !== void 0 && sess !== agent.session && sess?.id !== sessionId) return;
 				const out = toSessionEventOut(ev);
 				if (!out) return;
+				if (out.type === "assistant/chunk") nativeChunkSessions.add(sessionId);
 				if (out.type === "turn/start") lastAssistantText.delete(key);
 				if (out.type === "assistant/message" && out.text.trim() !== "") lastAssistantText.set(key, out.text);
 				if (out.type === "turn/end" && out.finalText === void 0) {
@@ -736,6 +761,17 @@ function createDshAdapter(deps) {
 				}
 				const set = listeners.get(key);
 				if (set) for (const fn of set) fn(out);
+			}) ?? (() => {});
+			const llmStreamDisp = onFn("llm/stream", (options, next) => {
+				if (!shouldSynthesizeChunks(options, sessionId, nativeChunkSessions)) return next();
+				return synthesizeAssistantChunks(next(), (text) => {
+					const out = {
+						type: "assistant/chunk",
+						text
+					};
+					const set = listeners.get(key);
+					if (set) for (const fn of set) fn(out);
+				});
 			}) ?? (() => {});
 			const errDisp = agent.ctx.on("agent/error", (payload) => {
 				const errText = payload.error instanceof Error ? payload.error.message : String(payload.error);
@@ -765,6 +801,9 @@ function createDshAdapter(deps) {
 			disposers.set(key, () => {
 				try {
 					disp();
+				} catch {}
+				try {
+					llmStreamDisp();
 				} catch {}
 				try {
 					errDisp();
