@@ -292,6 +292,7 @@ function createDshAdapter(deps) {
 	const listeners = /* @__PURE__ */ new Map();
 	const disposers = /* @__PURE__ */ new Map();
 	const nativeChunkSessions = /* @__PURE__ */ new Set();
+	const synthesisLogged = /* @__PURE__ */ new Set();
 	const lastAssistantText = /* @__PURE__ */ new Map();
 	const ensureInFlight = /* @__PURE__ */ new Map();
 	let runNonce = deps.runNonce ?? `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
@@ -764,6 +765,10 @@ function createDshAdapter(deps) {
 			}) ?? (() => {});
 			const llmStreamDisp = onFn("llm/stream", (options, next) => {
 				if (!shouldSynthesizeChunks(options, sessionId, nativeChunkSessions)) return next();
+				if (!synthesisLogged.has(sessionId)) {
+					synthesisLogged.add(sessionId);
+					deps.logger?.info(`llm/stream chunk synthesis active for ${key}`);
+				}
 				return synthesizeAssistantChunks(next(), (text) => {
 					const out = {
 						type: "assistant/chunk",
@@ -772,7 +777,7 @@ function createDshAdapter(deps) {
 					const set = listeners.get(key);
 					if (set) for (const fn of set) fn(out);
 				});
-			}) ?? (() => {});
+			}, { global: true }) ?? (() => {});
 			const errDisp = agent.ctx.on("agent/error", (payload) => {
 				const errText = payload.error instanceof Error ? payload.error.message : String(payload.error);
 				const errObj = payload.error;

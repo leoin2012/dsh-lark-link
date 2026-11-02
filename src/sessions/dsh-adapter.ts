@@ -299,6 +299,8 @@ export function createDshAdapter(deps: DshAdapterDeps): DshSessionBackend {
 	// (dsh ≤0.1.x, or a future dsh that restores the event). There we must NOT
 	// also synthesize chunks from llm/stream — the card text would double.
 	const nativeChunkSessions = new Set<string>();
+	// One-time info log per session when chunk synthesis first fires.
+	const synthesisLogged = new Set<string>();
 	// GH #9: last assistant text of the CURRENT turn per conversation key.
 	// turn/start clears it, assistant/message refreshes it, turn/end carries
 	// it — the outbound forwarder uses it to rescue a delivery whose
@@ -1134,24 +1136,37 @@ export function createDshAdapter(deps: DshAdapterDeps): DshSessionBackend {
 		// overloads that do not cover the llm/stream waterfall signature, so
 		// pin the call-site shape explicitly (runtime contract verified against
 		// dsh-llm: ctx.waterfall(this, "llm/stream", options, next)).
+		// { global: true } is REQUIRED: the waterfall fires on the llm service's
+		// own context, not the plugin root — dsh-session-title's llm/stream
+		// subscription uses the same flag for the same reason; without it the
+		// listener never fires and streaming silently stays dark.
 		const onLlmStream = onFn as unknown as (
 			event: string,
 			listener: (
 				options: unknown,
 				next: () => AsyncIterable<StreamChunk>,
 			) => AsyncIterable<StreamChunk>,
+			options?: { global?: boolean },
 		) => (() => void) | undefined;
 		const llmStreamDisp =
-			onLlmStream("llm/stream", (options, next) => {
-				if (!shouldSynthesizeChunks(options, sessionId, nativeChunkSessions)) {
-					return next();
-				}
-				return synthesizeAssistantChunks(next(), (text) => {
-					const out: SessionEventOut = { type: "assistant/chunk", text };
-					const set = listeners.get(key);
-					if (set) for (const fn of set) fn(out);
-				});
-			}) ?? (() => {});
+			onLlmStream(
+				"llm/stream",
+				(options, next) => {
+					if (!shouldSynthesizeChunks(options, sessionId, nativeChunkSessions)) {
+						return next();
+					}
+					if (!synthesisLogged.has(sessionId)) {
+						synthesisLogged.add(sessionId);
+						deps.logger?.info(`llm/stream chunk synthesis active for ${key}`);
+					}
+					return synthesizeAssistantChunks(next(), (text) => {
+						const out: SessionEventOut = { type: "assistant/chunk", text };
+						const set = listeners.get(key);
+						if (set) for (const fn of set) fn(out);
+					});
+				},
+				{ global: true },
+			) ?? (() => {});
 		// GH #15: do NOT `disposers.set(key, disp)` here — the agent/error
 		// disposer below would OVERWRITE it in the plain Map, so handle
 		// dispose / rotate / releaseLiveSession / disposeIdle only ever
