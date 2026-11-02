@@ -1190,6 +1190,10 @@ export function apply(ctx: Context, rawConfig: unknown): void {
 							inspect?(id: string): Promise<{ meta?: unknown; events?: readonly unknown[] } | undefined>;
 							load?(id: string): Promise<{ header?: unknown; events?: readonly unknown[] } | undefined>;
 							readFrom?(id: string, fromSeq: number): Promise<{ meta?: unknown; events?: readonly unknown[] } | undefined>;
+							open?(id: string, access: string): Promise<{
+								read(offset?: number, length?: number): Promise<{ events?: readonly unknown[] }>;
+								close?(): Promise<void> | void;
+							}>;
 					  }
 					| undefined;
 				let sessions: Array<{
@@ -1243,6 +1247,9 @@ export function apply(ctx: Context, rawConfig: unknown): void {
 									readFrom: persistence.readFrom
 										? async (id: string, fromSeq: number) =>
 												await persistence.readFrom!(id, fromSeq)
+										: undefined,
+									open: persistence.open
+										? async (id: string) => await persistence.open!(id, "read")
 										: undefined,
 								}
 							: undefined,

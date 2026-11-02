@@ -68,12 +68,23 @@ export interface WorkspaceSessionInfo {
 	source: "service" | "scan";
 }
 
+/** Read handle as returned by dsh 0.2.x `sessionPersistence.open(id, "read")`. */
+export interface PersistenceReadHandleLike {
+	read(offset?: number, length?: number): Promise<{ events?: readonly unknown[] }>;
+	close?(): Promise<void> | void;
+}
+
 export interface PersistenceListSource {
 	list(signal?: AbortSignal): Promise<unknown[]>;
 	inspect?(id: string, signal?: AbortSignal): Promise<{ meta?: unknown; events?: readonly unknown[] } | undefined>;
 	load?(id: string): Promise<{ header?: unknown; events?: readonly unknown[] } | undefined>;
 	readFrom?(id: string, fromSeq: number): Promise<{ meta?: unknown; events?: readonly unknown[] } | undefined>;
+	/** dsh 0.2.x read API — preferred when present (inspect/load/readFrom are gone). */
+	open?(id: string): Promise<PersistenceReadHandleLike>;
 }
+
+/** How far into one session log we scan when resolving a /resume title. */
+export const TITLE_SCAN_EVENT_LIMIT = 400;
 
 
 export interface ListWorkspaceSessionsDeps {
@@ -267,7 +278,16 @@ export async function listWorkspaceSessions(
 				}
 				try {
 					let events: readonly unknown[] | undefined;
-					if (deps.persistence?.inspect) {
+					if (deps.persistence?.open) {
+						// dsh 0.2.x: open a read handle and scan the log prefix for
+						// session/title + first user message (extractTitleFromEvents).
+						const handle = await deps.persistence.open(row.id);
+						try {
+							events = (await handle.read(0, TITLE_SCAN_EVENT_LIMIT))?.events;
+						} finally {
+							await handle.close?.();
+						}
+					} else if (deps.persistence?.inspect) {
 						const res = await deps.persistence.inspect(row.id);
 						events = res?.events;
 					} else if (deps.persistence?.load) {

@@ -1374,7 +1374,14 @@ async function listWorkspaceSessions(deps) {
 		}
 		try {
 			let events;
-			if (deps.persistence?.inspect) events = (await deps.persistence.inspect(row.id))?.events;
+			if (deps.persistence?.open) {
+				const handle = await deps.persistence.open(row.id);
+				try {
+					events = (await handle.read(0, 400))?.events;
+				} finally {
+					await handle.close?.();
+				}
+			} else if (deps.persistence?.inspect) events = (await deps.persistence.inspect(row.id))?.events;
 			else if (deps.persistence?.load) events = (await deps.persistence.load(row.id))?.events;
 			else if (deps.persistence?.readFrom) events = (await deps.persistence.readFrom(row.id, 0))?.events;
 			if (events) {
@@ -5315,7 +5322,8 @@ function apply(ctx, rawConfig) {
 							list: async () => await persistence.list(),
 							inspect: persistence.inspect ? async (id) => await persistence.inspect(id) : void 0,
 							load: persistence.load ? async (id) => await persistence.load(id) : void 0,
-							readFrom: persistence.readFrom ? async (id, fromSeq) => await persistence.readFrom(id, fromSeq) : void 0
+							readFrom: persistence.readFrom ? async (id, fromSeq) => await persistence.readFrom(id, fromSeq) : void 0,
+							open: persistence.open ? async (id) => await persistence.open(id, "read") : void 0
 						} : void 0,
 						titleFor
 					});

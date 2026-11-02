@@ -309,6 +309,40 @@ test("extractTitleFromEvents: falls back to first human user message when no ses
 	assert.equal(extractTitleFromEvents(events), "帮我实现飞书机器人的流式卡片输出");
 });
 
+test("list: titles resolve via dsh 0.2.x open/read handles (GH regression)", async () => {
+	// dsh 0.2.x 的持久化服务没有 inspect/load/readFrom，标题读取必须走
+	// open(id, "read") + handle.read()；旧代码三条旧 API 全缺席 → /resume 无标题。
+	const persistence = {
+		async list() {
+			return [{ header: { id: "sess-1", createdAt: 1000, cwd: "/ws/proj" }, revision: "1:1" }];
+		},
+		async open(id: string) {
+			assert.equal(id, "sess-1");
+			return {
+				async read(offset: number, _length?: number) {
+					assert.equal(offset, 0);
+					return {
+						events: [
+							{
+								type: "session/title",
+								data: { title: "比目鱼对话记忆" },
+							},
+						],
+					};
+				},
+				async close() {},
+			};
+		},
+	};
+	const rows = await listWorkspaceSessions({
+		sessionsRoot: "/nonexistent",
+		cwd: "/ws/proj",
+		persistence,
+	});
+	assert.equal(rows.length, 1);
+	assert.equal(rows[0]!.title, "比目鱼对话记忆");
+});
+
 test("list: inspect resolves titles from persistence events", async () => {
 	const persistence = {
 		async list() {
