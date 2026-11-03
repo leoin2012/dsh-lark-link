@@ -500,16 +500,27 @@ export function apply(ctx: Context, rawConfig: unknown): void {
 				emoji_type: emojiType,
 			});
 		},
-		async sendFile(chatId, fileKey, type) {
+		async sendFile(
+			chatId: string,
+			fileKey: string,
+			type: "image" | "file" | "media",
+			fileName?: string,
+		) {
 			const client = getLarkClient();
 			if (!client?.sendMessage) throw new Error("lark client not ready");
+			// msg_type "media" (video) requires file_name in the content body —
+			// an image_key/file_key-only payload renders as a broken video card.
 			await client.sendMessage({
 				receive_id_type: chatId.startsWith("oc_") ? "chat_id" : "open_id",
 				params: {
 					receive_id: chatId,
 					msg_type: type,
 					content: JSON.stringify(
-						type === "image" ? { image_key: fileKey } : { file_key: fileKey },
+						type === "image"
+							? { image_key: fileKey }
+							: type === "media"
+								? { file_key: fileKey, file_name: fileName || "video.mp4" }
+								: { file_key: fileKey },
 					),
 				},
 			});
@@ -2289,7 +2300,7 @@ export function apply(ctx: Context, rawConfig: unknown): void {
 					type: "string",
 					required: true,
 					description:
-						"image（png/jpeg/webp/gif，其他格式如 svg 自动按 file 发送）| file",
+						"image（png/jpeg/webp/gif，其他格式如 svg 自动按 file 发送）| file（mp4/mov 自动按可播放视频发送）",
 				},
 				caption: { type: "string", description: "Optional caption text" },
 			},
@@ -2336,6 +2347,7 @@ export function apply(ctx: Context, rawConfig: unknown): void {
 				// (svg etc.) falls back to file upload regardless of kind.
 				const IMAGE_EXT = /\.(png|jpe?g|webp|gif)$/i;
 				const isImage = args.kind === "image" && IMAGE_EXT.test(args.path);
+				const isVideo = !isImage && /\.(mp4|mov)$/i.test(args.path);
 				if (isImage ? !client.uploadImage : !client.uploadFile)
 					return "错误: lark 客户端未就绪";
 				let buf: Buffer;
@@ -2357,7 +2369,8 @@ export function apply(ctx: Context, rawConfig: unknown): void {
 				} else {
 					uploadKey = extractUploadKey(
 						await client.uploadFile!({
-							file_type: "file",
+							// im/v1/files only accepts opus|mp4|pdf|doc|xls|ppt|stream.
+							file_type: isVideo ? "mp4" : "file",
 							file_name: fileName,
 							file: buf,
 						}),
@@ -2365,10 +2378,15 @@ export function apply(ctx: Context, rawConfig: unknown): void {
 					);
 				}
 				if (!uploadKey) return "错误: 上传失败";
+				// Feishu plays mp4/mov inline only when uploaded as file_type
+				// "mp4" and sent as msg_type "media". Uploading a video as
+				// file_type "file" + msg_type "file" delivers it as an opaque
+				// attachment card instead of a playable video.
 				await sender.sendFile(
 					route.chatId,
 					uploadKey,
-					isImage ? "image" : "file",
+					isImage ? "image" : isVideo ? "media" : "file",
+					fileName,
 				);
 				return `已发送 ${args.path}`;
 			},

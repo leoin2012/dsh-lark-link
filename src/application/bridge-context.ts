@@ -23,7 +23,7 @@ export interface FeishuSender {
   sendText(chatId: string, text: string): Promise<unknown>;
   sendCard(chatId: string, card: unknown): Promise<unknown>;
   addReaction(messageId: string, emojiType: string): Promise<void>;
-  sendFile(chatId: string, fileKey: string, type: "image" | "file"): Promise<unknown>;
+  sendFile(chatId: string, fileKey: string, type: "image" | "file" | "media", fileName?: string): Promise<unknown>;
   listMessages(params: { chatId: string; startTimeMs: number; endTimeMs: number }): Promise<Array<{ messageId: string; timestampMs: number }>>;
 }
 
